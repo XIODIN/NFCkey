@@ -1,6 +1,6 @@
 #include <Arduino.h>
 #include <vector>
-#include <FastLED.h>
+// #include <FastLED.h>
 #include "driver/adc.h"
 #include "esp_adc_cal.h"
 #include "AudioTools.h"
@@ -19,6 +19,7 @@
 #define LRC1_PIN 5
 #define CLK1_PIN 6
 #define DATA1_PIN 7
+#define DAC_EN 10
 float VOLUME1 = 1;
 
 // 舵机通信
@@ -29,9 +30,9 @@ float VOLUME1 = 1;
 #define EN_5V 2
 
 // LED参数
-#define NUM_LEDS 1   // LED数量
-#define DATA_PIN 8   // 数据引脚
-CRGB leds[NUM_LEDS]; // LED实例
+// #define NUM_LEDS 1   // LED数量
+// #define DATA_PIN 8   // 数据引脚
+// CRGB leds[NUM_LEDS]; // LED实例
 
 // ADC配置
 #define BATTERY_ADC_CHANNEL ADC1_CHANNEL_1
@@ -60,6 +61,33 @@ float read_battery_voltage(void)
   return battery_voltage;
 }
 
+// 日志
+const int loglevel = 2;
+#define LOG_E(...) logMessage(0, "ERROR", __VA_ARGS__)
+#define LOG_W(...) logMessage(1, "WARN", __VA_ARGS__)
+#define LOG_I(...) logMessage(2, "INFO", __VA_ARGS__)
+#define LOG_D(...) logMessage(3, "DEBUG", __VA_ARGS__)
+#define LOG_V(...) logMessage(4, "V", __VA_ARGS__)
+void logMessage(const int level, const char *tag, const char *format, ...)
+{
+  if (level > loglevel)
+  {
+    return;
+  }
+
+  Serial.print("[");
+  Serial.print(tag);
+  Serial.print("] ");
+
+  char buffer[128];
+  va_list args;
+  va_start(args, format);
+  vsnprintf(buffer, sizeof(buffer), format, args);
+  va_end(args);
+
+  Serial.println(buffer);
+}
+
 // 全局音频流
 I2SStream i2s;                           // i2s
 AACDecoderHelix helix;                   // aac decoder
@@ -67,9 +95,9 @@ VolumeStream volume(i2s);                // volume to i2s
 EncodedAudioStream out(&volume, &helix); // output to volume
 StreamCopy copier;                       // copy in to decoder
 // 播放线程状态标记
-bool isplaying = false;
-bool isplListrun = false;
-unsigned int arrsize;
+volatile bool isplaying = false;
+volatile bool isplListrun = false;
+unsigned int arrsize = 0;
 // 解码主线程
 TaskHandle_t playerHandle = NULL;
 void player(void *parameter)
@@ -101,7 +129,8 @@ void player(void *parameter)
     copier.copy();
     vTaskDelay(pdMS_TO_TICKS(5));
   }
-  vTaskDelay(pdMS_TO_TICKS(100));
+
+  vTaskDelay(pdMS_TO_TICKS(10));
 
   helix.end(); // flush output
   auto info = out.decoder().audioInfo();
@@ -112,7 +141,15 @@ void player(void *parameter)
   copier.end();
   out.end();
   data.end();
-  vTaskDelay(pdMS_TO_TICKS(100));
+
+  if (!isplListrun)
+  {
+    digitalWrite(DAC_EN, LOW);
+    LOG_I("播放任务完成~");
+  }
+
+  vTaskDelay(pdMS_TO_TICKS(10));
+
   isplaying = false;
   vTaskDelete(NULL);
 }
@@ -131,7 +168,7 @@ void switchaudio(unsigned int in)
 
     arrsize = sizeof(ready_data);
     dataarr = (void *)ready_data;
-    pname = "player";
+    pname = "player1";
     break;
   case 2:
     // reading
@@ -144,25 +181,25 @@ void switchaudio(unsigned int in)
     // accept
     // copier.begin(out, mp3_accept);
     choi = random(1, 4);
-    Serial.println(choi);
+
     switch (choi)
     {
     case 1:
       // VOLUME1=0.65;
 
-    //卡
+      // 卡
       arrsize = sizeof(accept_data);
       dataarr = (void *)accept_data;
       break;
     case 2:
-    //Ciallo～ (∠・ω< )⌒★
+      // Ciallo～ (∠・ω< )⌒★
       VOLUME1 = 0.9;
 
       arrsize = sizeof(accept_data_2);
       dataarr = (void *)accept_data_2;
       break;
     case 3:
-    //Welcome to Rhinelab LLC, Internal Residence.
+      // Welcome to Rhinelab LLC, Internal Residence.
       arrsize = sizeof(accept_data_2);
       dataarr = (void *)accept_data_2;
       break;
@@ -228,7 +265,7 @@ void switchaudio(unsigned int in)
 // 音源管理
 TaskHandle_t playerListHandle = NULL;
 unsigned char playlist[20];
-unsigned char playlistcount = 0, playlistindex = 0;
+unsigned int playlistcount = 0, playlistindex = 0;
 void playerList(void *parameter)
 {
   isplListrun = true;
@@ -240,13 +277,13 @@ void playerList(void *parameter)
       switchaudio(playlist[playlistindex]);
       playlistindex++;
       playlistcount--;
-      Serial.print("播放列表:");
-      Serial.print(playlistindex);
-      Serial.print("/");
-      Serial.println(playlistcount);
+      LOG_I("播放列表 %d/%d", playlistindex, playlistcount+1);
     }
-    vTaskDelay(pdMS_TO_TICKS(10));
+    vTaskDelay(pdMS_TO_TICKS(50));
   }
+
+  playlistcount = 0;
+  playlistindex = 0;
   isplListrun = false;
 
   vTaskDelete(NULL);
@@ -258,6 +295,8 @@ void addTolist(unsigned int in)
   playlistcount++;
   if (!isplListrun)
   {
+    digitalWrite(DAC_EN, HIGH);
+    vTaskDelay(pdMS_TO_TICKS(10));
     xTaskCreatePinnedToCore(
         playerList,        // 任务函数
         "playerlist1",     // 任务名称
@@ -322,22 +361,6 @@ void sendServoPosition(unsigned int in)
   Serial1.write(HEADER, 2); // 发送包头
   Serial1.write(data, 6);   // 发送数据部分
   Serial1.write(checksum);  // 发送校验和
-
-  // 可选：调试输出
-  // Serial.print("位置: ");
-  // Serial.print(position);
-  // Serial.print(" (0x");
-  // Serial.print(position, HEX);
-  // Serial.println(")");
-
-  // Serial.print("指令: FF FF ");
-  // for (int i = 0; i < 6; i++) {
-  //   if (data[i] < 0x10) Serial.print("0");
-  //   Serial.print(data[i], HEX);
-  //   Serial.print(" ");
-  // }
-  // if (checksum < 0x10) Serial.print("0");
-  // Serial.println(checksum, HEX);
 }
 
 // 舵机动作
@@ -360,7 +383,7 @@ void Switchlock()
   sendServoPosition(1180);
   vTaskDelay(pdMS_TO_TICKS(1000));
 
-  Serial.println("Servo done");
+  LOG_D("舵机完成动作");
 
   isservobusy = false;
 }
@@ -433,7 +456,7 @@ NFCcard ReadCard()
   // 超时检查：如果已经开始接收帧但超过设定时间没有收到完整数据，则重置状态
   if (frameStarted && (millis() - lastReceiveTime > TIMEOUT_MS))
   {
-    Serial.println("接收超时，重置接收状态");
+    LOG_V("接收超时，重置接收状态");
     frameStarted = false;
     bufferIndex = 0;
     return readdata;
@@ -444,13 +467,12 @@ NFCcard ReadCard()
     uint8_t incomingByte = Serial1.read();
     lastReceiveTime = millis(); // 更新最后接收时间
 
-    Serial.print("收到字节: 0x");
-    Serial.println(incomingByte, HEX);
+    LOG_V("收到字节: 0x%X", incomingByte);
 
     // 寻找帧起始符 0x20
     if (!frameStarted && incomingByte == 0x20)
     {
-      Serial.println("检测到帧起始符 0x20 开始接收帧");
+
       frameStarted = true;
       bufferIndex = 0;
       rxBuffer[bufferIndex++] = incomingByte;
@@ -460,22 +482,17 @@ NFCcard ReadCard()
     else if (frameStarted)
     {
       rxBuffer[bufferIndex++] = incomingByte;
-      // Serial.print("缓冲索引: ");
-      // Serial.println(bufferIndex);
 
       // 检查是否收到完整的帧 (14字节)
       if (bufferIndex >= 14)
       {
-        Serial.println("收到完整帧(14字节)，开始解析");
 
         // 检查帧结构是否正确 (起始符和结束符)
         if (rxBuffer[0] != 0x20 || rxBuffer[13] != 0x03)
         {
-          Serial.println("帧结构错误: 起始符或结束符不正确");
-          Serial.print("起始符: 0x");
-          Serial.print(rxBuffer[0], HEX);
-          Serial.print(", 结束符: 0x");
-          Serial.println(rxBuffer[13], HEX);
+
+          LOG_V("帧结构错误: 起始符或结束符不正确");
+          LOG_V("起始符: 0x%X, 结束符: 0x%X", rxBuffer[0], rxBuffer[13]);
 
           frameStarted = false;
           bufferIndex = 0;
@@ -491,14 +508,9 @@ NFCcard ReadCard()
         }
         checksum = ~checksum;
 
-        // Serial.print("计算校验和: 0x");
-        // Serial.print(checksum, HEX);
-        // Serial.print(", 接收校验和: 0x");
-        // Serial.println(rxBuffer[12], HEX);
-
         if (checksum != rxBuffer[12])
         {
-          Serial.println("校验和错误");
+          LOG_V("校验和错误");
           frameStarted = false;
           bufferIndex = 0;
           readdata.uidLength = 0;
@@ -516,49 +528,26 @@ NFCcard ReadCard()
         char serialStr[9];
         sprintf(serialStr, "%02X%02X%02X%02X", readdata.uid[0], readdata.uid[1], readdata.uid[2], readdata.uid[3]);
 
-        Serial.print("卡片序列号: ");
-        Serial.println(serialStr);
-
-        // 打印完整帧数据用于调试
-        // Serial.print("完整帧数据: ");
-        // for (int i = 0; i < 14; i++)
-        // {
-        //   Serial.print("0x");
-        //   Serial.print(rxBuffer[i], HEX);
-        //   Serial.print(" ");
-        // }
-        // Serial.println();
+        LOG_V("卡片序列号: %s", serialStr);
 
         frameStarted = false;
         bufferIndex = 0;
-        Serial.println("帧处理完成");
         return readdata;
       }
 
       // 防止缓冲区溢出
       if (bufferIndex >= sizeof(rxBuffer))
       {
-        Serial.println("缓冲区溢出，重置接收状态");
+        LOG_V("缓冲区溢出，重置接收状态");
         frameStarted = false;
         bufferIndex = 0;
         readdata.uidLength = 0;
         return readdata;
       }
     }
-    else
-    {
-      Serial.println("等待帧起始符...");
-    }
   }
 
   // 没有读取到完整数据时返回空数据
-  if (frameStarted)
-  {
-    Serial.print("正在接收数据，当前已接收 ");
-    Serial.print(bufferIndex);
-    Serial.println(" 字节");
-  }
-
   readdata.uidLength = 0;
   return readdata;
 }
@@ -574,31 +563,7 @@ void sendCardSearchCommand()
   // 通过Serial1发送指令
   Serial1.write(cardSearchCmd, sizeof(cardSearchCmd));
 
-  // Serial.print("发送寻卡指令: ");
-  // for (int i = 0; i < sizeof(cardSearchCmd); i++)
-  // {
-  //   Serial.print("0x");
-  //   if (cardSearchCmd[i] < 0x10)
-  //     Serial.print("0");
-  //   Serial.print(cardSearchCmd[i], HEX);
-  //   Serial.print(" ");
-  // }
-  // Serial.println();
-
   vTaskDelay(pdMS_TO_TICKS(100));
-
-  // 检查是否有返回数据
-  // if(Serial1.available()) {
-  //   Serial.print("收到响应: ");
-  //   while(Serial1.available()) {
-  //     uint8_t response = Serial1.read();
-  //     Serial.print("0x");
-  //     if(response < 0x10) Serial.print("0");
-  //     Serial.print(response, HEX);
-  //     Serial.print(" ");
-  //   }
-  //   Serial.println();
-  // }
 }
 
 void setup()
@@ -621,10 +586,10 @@ void setup()
       ADC_UNIT_1, ADC_ATTEN, ADC_WIDTH_BIT_12, 1100, &adc_chars);
 
   // 初始化LED
-  FastLED.addLeds<WS2812, DATA_PIN, GRB>(leds, NUM_LEDS);
-  FastLED.setBrightness(150);
-  leds[0] = CRGB::White;
-  FastLED.show();
+  // FastLED.addLeds<WS2812, DATA_PIN, GRB>(leds, NUM_LEDS);
+  // FastLED.setBrightness(150);
+  // leds[0] = CRGB::White;
+  // FastLED.show();
 
   // 初始化5V电源控制
   pinMode(EN_5V, OUTPUT);
@@ -635,27 +600,33 @@ void setup()
   gpio_wakeup_enable((gpio_num_t)IRQ, GPIO_INTR_HIGH_LEVEL);
   esp_sleep_enable_gpio_wakeup();
 
+  pinMode(DAC_EN, OUTPUT);
+  digitalWrite(DAC_EN, HIGH);
+
   delay(1000);
 
   // au:ready
   addTolist(1);
   delay(2000);
   digitalWrite(EN_5V, LOW);
+  digitalWrite(DAC_EN, LOW);
+
   delay(1000);
 
-  Serial.println("Ready!");
-  leds[0] = CRGB::Black;
-  FastLED.show();
+  LOG_I("初始化完成");
+
+  // leds[0] = CRGB::Black;
+  // FastLED.show();
 }
 
 void loop()
 {
 
   // 进入浅睡眠
-  Serial.println("Sleeping!");
+  LOG_I("进入浅睡眠");
   vTaskDelay(pdMS_TO_TICKS(100));
   esp_light_sleep_start();
-  Serial.println("Wake up!");
+  LOG_I("已唤醒");
 
   digitalWrite(EN_5V, HIGH);
   vTaskDelay(pdMS_TO_TICKS(10));
@@ -671,8 +642,7 @@ void loop()
   // 检查 UART1 是否有数据可读
   if (Serial1.available() > 0)
   {
-    Serial.println("--------------------");
-    Serial.println("Card detected");
+    LOG_I("检测到卡");
 
     // 读取标签
     NFCcard currentcard;
@@ -684,7 +654,7 @@ void loop()
       if (isCardAuthorized(currentcard, authorizedCards, Cardscount))
       {
         // 匹配
-        Serial.println("ACCEPTED");
+        LOG_I("卡授权");
 
         // 切换舵机通信
 
@@ -693,8 +663,8 @@ void loop()
         Serial1.begin(UART_servo_BAUDRATE, SERIAL_8N1, UART1_RX_PIN, UART1_TX_servo_PIN);
         vTaskDelay(pdMS_TO_TICKS(300));
 
-        leds[0] = CRGB::Green;
-        FastLED.show();
+        // leds[0] = CRGB::Green;
+        // FastLED.show();
 
         // 舵机动作
         if (!isservobusy)
@@ -705,9 +675,9 @@ void loop()
       else
       {
         // 不匹配
-        leds[0] = CRGB::Red;
-        FastLED.show();
-        Serial.println("DENIED");
+        // leds[0] = CRGB::Red;
+        // FastLED.show();
+        LOG_I("卡拒绝");
 
         // au:denied
         addTolist(4);
@@ -716,14 +686,15 @@ void loop()
     else
     {
       // 卡数据无效
-      leds[0] = CRGB::Yellow;
-      FastLED.show();
+      // leds[0] = CRGB::Yellow;
+      // FastLED.show();
 
       // au:readerror
       addTolist(5);
 
-      Serial.println("NO DATA");
-      vTaskDelay(pdMS_TO_TICKS(1000));
+      LOG_W("卡数据异常");
+
+      vTaskDelay(pdMS_TO_TICKS(100));
     }
 
     // 等待舵机完成动作
@@ -737,35 +708,37 @@ void loop()
     vTaskDelay(pdMS_TO_TICKS(50));
     Serial1.begin(UART_reader_BAUDRATE, SERIAL_8N1, UART1_RX_PIN, UART1_TX_reader_PIN);
 
-    leds[0] = CRGB::Black;
-    FastLED.show();
-    Serial.println("--------------------");
+    // leds[0] = CRGB::Black;
+    // FastLED.show();
   }
 
   // 低电量提醒
   float voltage = read_battery_voltage();
-  Serial.print("BAT voltage: ");
-  Serial.println(voltage);
+  LOG_I("电池电压: %f", voltage);
   if (voltage <= 3.4 and voltage > 3.2)
   {
-    leds[0] = CRGB::Red;
+    LOG_W("电量低");
+    // leds[0] = CRGB::Red;
     // au:lowbat
     addTolist(6);
-    leds[0] = CRGB::Black;
-    FastLED.show();
+    // leds[0] = CRGB::Black;
+    // FastLED.show();
   }
   else if (voltage <= 3.2)
   {
-    leds[0] = CRGB::Red;
+    LOG_E("电量极低");
+    // leds[0] = CRGB::Red;
     // au:lowlowbat
     addTolist(7);
-    leds[0] = CRGB::Black;
-    FastLED.show();
+    // leds[0] = CRGB::Black;
+    // FastLED.show();
   }
 
-  vTaskDelay(pdMS_TO_TICKS(3000));
+  // 等待音频完成播放
+  while (isplListrun)
+  {
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
 
   digitalWrite(EN_5V, LOW);
-
-  vTaskDelay(pdMS_TO_TICKS(100));
 }
