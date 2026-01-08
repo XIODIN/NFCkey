@@ -95,9 +95,10 @@ VolumeStream volume(i2s);                // volume to i2s
 EncodedAudioStream out(&volume, &helix); // output to volume
 StreamCopy copier;                       // copy in to decoder
 // 播放线程状态标记
+volatile bool isplayerinit = false;
 volatile bool isplaying = false;
 volatile bool isplListrun = false;
-unsigned int arrsize = 0;
+volatile unsigned int arrsize = 0;
 // 解码主线程
 TaskHandle_t playerHandle = NULL;
 void player(void *parameter)
@@ -108,21 +109,32 @@ void player(void *parameter)
   const unsigned char *DATA = (const unsigned char *)parameter;
   MemoryStream data(DATA, arrsize);
 
-  // i2s配置
-  auto cfg = i2s.defaultConfig();
-  cfg.sample_rate = 44100;
-  cfg.channels = 1;
-  cfg.pin_bck = CLK1_PIN;
-  cfg.pin_data = DATA1_PIN;
-  cfg.pin_ws = LRC1_PIN;
-  i2s.begin(cfg);
-  // 音量控制配置
-  volume.setVolume(VOLUME1);
-  volume.begin();
+  if (!isplayerinit)
+  {
 
-  // 输出流配置
-  out.begin();
-  copier.begin(out, data);
+    // i2s配置
+    auto cfg = i2s.defaultConfig();
+    cfg.sample_rate = 44100;
+    cfg.channels = 1;
+    cfg.pin_bck = CLK1_PIN;
+    cfg.pin_data = DATA1_PIN;
+    cfg.pin_ws = LRC1_PIN;
+    i2s.begin(cfg);
+    // 音量控制配置
+    volume.setVolume(VOLUME1);
+    volume.begin();
+
+    // 输出流配置
+    out.begin();
+    copier.begin(out, data);
+
+    isplayerinit = true;
+  }
+
+  auto info = out.decoder().audioInfo();
+  LOGI("The audio rate from the mp3 file is %d", info.sample_rate);
+  LOGI("The channels from the mp3 file is %d", info.channels);
+
   while (data.available())
   {
     // 解码线程
@@ -130,25 +142,21 @@ void player(void *parameter)
     vTaskDelay(pdMS_TO_TICKS(5));
   }
 
-  vTaskDelay(pdMS_TO_TICKS(10));
-
-  helix.end(); // flush output
-  auto info = out.decoder().audioInfo();
-  LOGI("The audio rate from the mp3 file is %d", info.sample_rate);
-  LOGI("The channels from the mp3 file is %d", info.channels);
-  i2s.end();
-  volume.end();
-  copier.end();
-  out.end();
-  data.end();
 
   if (!isplListrun)
   {
+    helix.end();
+    i2s.end();
+    volume.end();
+    copier.end();
+    out.end();
+    data.end();
+
+    isplayerinit = false;
+
     digitalWrite(DAC_EN, LOW);
     LOG_I("播放任务完成~");
   }
-
-  vTaskDelay(pdMS_TO_TICKS(10));
 
   isplaying = false;
   vTaskDelete(NULL);
@@ -254,7 +262,7 @@ void switchaudio(unsigned int in)
   xTaskCreatePinnedToCore(
       player,        // 任务函数
       pname.c_str(), // 任务名称
-      4096 * 1,      // 堆栈大小（字节）
+      4096 ,      // 堆栈大小（字节）
       dataarr,       // 参数
       3,             // 优先级
       &playerHandle, // 任务句柄
@@ -264,20 +272,19 @@ void switchaudio(unsigned int in)
 }
 // 音源管理
 TaskHandle_t playerListHandle = NULL;
-unsigned char playlist[20];
+unsigned char playlist[20]={};
 unsigned int playlistcount = 0, playlistindex = 0;
 void playerList(void *parameter)
 {
   isplListrun = true;
-  while (playlistcount > 0)
+  while (playlistcount > 0||isplaying)
   {
     if (!isplaying)
     {
       vTaskDelay(pdMS_TO_TICKS(100));
       switchaudio(playlist[playlistindex]);
       playlistindex++;
-      playlistcount--;
-      LOG_I("播放列表 %d/%d", playlistindex, playlistcount + 1);
+      LOG_I("播放列表 %d/%d", playlistindex, playlistcount);
     }
     vTaskDelay(pdMS_TO_TICKS(50));
   }
@@ -291,16 +298,16 @@ void playerList(void *parameter)
 // 添加播放任务到列表
 void addTolist(unsigned int in)
 {
-  playlist[playlistindex + playlistcount] = in;
+  playlist[playlistcount] = in;
   playlistcount++;
   if (!isplListrun)
   {
     digitalWrite(DAC_EN, HIGH);
-    vTaskDelay(pdMS_TO_TICKS(10));
+    vTaskDelay(pdMS_TO_TICKS(100));
     xTaskCreatePinnedToCore(
         playerList,        // 任务函数
         "playerlist1",     // 任务名称
-        1024,              // 堆栈大小（字节）
+        1024*2,              // 堆栈大小（字节）
         NULL,              // 参数
         1,                 // 优先级
         &playerListHandle, // 任务句柄
