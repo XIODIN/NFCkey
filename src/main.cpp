@@ -277,7 +277,7 @@ void playerList(void *parameter)
       switchaudio(playlist[playlistindex]);
       playlistindex++;
       playlistcount--;
-      LOG_I("播放列表 %d/%d", playlistindex, playlistcount+1);
+      LOG_I("播放列表 %d/%d", playlistindex, playlistcount + 1);
     }
     vTaskDelay(pdMS_TO_TICKS(50));
   }
@@ -569,14 +569,14 @@ void sendCardSearchCommand()
 void setup()
 {
   // 低功耗
-   //setCpuFrequencyMhz(80);
+  // setCpuFrequencyMhz(80);
 
   // 初始化调试串口
   Serial.begin(115200);
   AudioToolsLogger.begin(Serial, AudioToolsLogLevel::Warning);
 
   // 初始化 UART1
-  Serial1.begin(UART_reader_BAUDRATE, SERIAL_8N1, UART1_RX_PIN, UART1_TX_reader_PIN);
+  Serial1.begin(UART_reader_BAUDRATE, SERIAL_8N1, UART1_RX_PIN, UART1_TX_servo_PIN);
 
   // 初始化ADC1
   adc1_config_width(ADC_WIDTH_BIT_12);
@@ -605,11 +605,19 @@ void setup()
 
   delay(1000);
 
+  // 舵机复位
+  sendServoPosition(1180);
+
   // au:ready
   addTolist(1);
   delay(2000);
   digitalWrite(EN_5V, LOW);
   digitalWrite(DAC_EN, LOW);
+
+  // 切换读卡器通信
+  Serial1.end();
+  vTaskDelay(pdMS_TO_TICKS(50));
+  Serial1.begin(UART_reader_BAUDRATE, SERIAL_8N1, UART1_RX_PIN, UART1_TX_reader_PIN);
 
   vTaskDelay(pdMS_TO_TICKS(1000));
 
